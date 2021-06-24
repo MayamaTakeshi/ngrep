@@ -155,6 +155,7 @@ void (*dump_func)(unsigned char *, uint32_t, uint16_t, uint16_t) = &dump_formatt
  * BPF/Network
  */
 
+char max_streams = 0;
 char *filter = NULL, *filter_file = NULL;
 char pc_err[PCAP_ERRBUF_SIZE];
 uint8_t link_offset;
@@ -178,6 +179,51 @@ SOCKET delay_socket = 0;
 #endif
 
 void (*print_time)() = NULL, (*dump_delay)() = dump_delay_proc_init;
+
+typedef struct Stream {
+    uint8_t proto;
+    unsigned char ip_a[16];
+    unsigned char ip_b[16];
+    uint16_t port_a;
+    uint16_t port_b;
+
+    struct Stream *next;
+} Stream;
+
+Stream *streams = NULL;
+int stream_count = 0;
+
+void add_stream(int limit, uint8_t proto, const char *ip_a, const char *ip_b, uint16_t port_a, uint16_t port_b) {
+    if(stream_count == limit) return;
+
+    struct Stream *new_stream = (struct Stream*)malloc(sizeof(struct Stream));
+
+    new_stream->proto = proto;
+    strcpy(new_stream->ip_a, ip_a);
+    strcpy(new_stream->ip_b, ip_b);
+    new_stream->port_a = port_a;
+    new_stream->port_b = port_b;
+
+    new_stream->next = streams;
+
+    streams = new_stream;
+
+    stream_count++;
+}
+
+int stream_exist(uint8_t proto, const char *ip_a, const char *ip_b, uint16_t port_a, uint16_t port_b) {
+    struct Stream *s = streams;
+    while(s) {
+        if(s->proto == proto && s->port_a == port_a && s->port_b == port_b && !strcmp(s->ip_a, ip_a) && !strcmp(s->ip_b, ip_b))
+            return 1;
+        else if(s->proto == proto && s->port_a == port_b && s->port_b == port_a && !strcmp(s->ip_a, ip_b) && !strcmp(s->ip_b, ip_a))
+            return 1;
+
+        s = s->next;
+    }
+
+    return 0;
+}
 
 
 /*
@@ -211,7 +257,7 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    while ((c = getopt(argc, argv, "LNhXViwqpevxlDtTRMK:Cs:n:c:d:A:I:O:S:P:F:W:")) != EOF) {
+    while ((c = getopt(argc, argv, "LNhXViwqpevxlDtTRMK:Cs:n:c:d:A:I:O:S:P:F:f:W:")) != EOF) {
         switch (c) {
             case 'W': {
                 if (!strcasecmp(optarg, "normal"))
@@ -229,6 +275,14 @@ int main(int argc, char **argv) {
                 }
             } break;
 
+            case 'f':
+                if(invert_match) {
+                    printf("fatal: option -f cannot be used with option -v (mutually exclusive)\n");
+                    usage();
+                } else {
+                    max_streams = _atoui32(optarg);
+                }
+                break;
             case 'F':
                 filter_file = optarg;
                 break;
@@ -315,7 +369,12 @@ int main(int argc, char **argv) {
                 show_hex++;
                 break;
             case 'v':
-                invert_match++;
+                if(max_streams) {
+                    printf("fatal: option -f cannot be used with option -v (mutually exclusive)\n");
+                    usage();
+                } else {
+                    invert_match++;
+                }
                 break;
             case 'e':
                 show_empty++;
@@ -913,8 +972,12 @@ void dump_packet(struct pcap_pkthdr *h, u_char *p, uint8_t proto, unsigned char 
     if (len > limitlen)
         len = limitlen;
 
-    if ((len > 0 && match_func(data, len, &match_index, &match_size) == invert_match) && !keep_matching)
-        return;
+    if(!stream_exist(proto, ip_src, ip_dst, sport, dport)) {
+        if ((len > 0 && match_func(data, len, &match_index, &match_size) == invert_match) && !keep_matching)
+            return;
+        else
+           if(max_streams) add_stream(max_streams, proto, ip_src, ip_dst, sport, dport);
+    }
 
     if (!live_read && want_delay)
         dump_delay(h);
@@ -1443,6 +1506,7 @@ void usage(void) {
            "   -c  is force the column width to the specified size\n"
            "   -P  is set the non-printable display char to what is specified\n"
            "   -F  is read the bpf filter from the specified file\n"
+           "   -f  is follow up to N TCP/UDP streams\n"
            "   -N  is show sub protocol number\n"
 #if defined(_WIN32)
            "   -d  is use specified device (index) instead of the pcap default\n"
